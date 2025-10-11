@@ -54,6 +54,7 @@ if missing:
         import sys
         sys.exit(1)
 
+import os
 from flask import Flask, render_template, request, redirect, url_for, session, send_file, jsonify, flash, abort
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -67,9 +68,20 @@ import secrets
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__)
-if app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
-    app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://', 1)
+
+# 🔥 CONFIGURATION POUR RENDER 🔥
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-key-change-in-production')
+
+# Configuration de la base de données
+database_url = os.environ.get('DATABASE_URL', 'sqlite:///' + os.path.join(BASE_DIR, 'database', 'syndicpro.db'))
+
+# Si on utilise PostgreSQL sur Render, corriger l'URL
+if database_url and database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 db = SQLAlchemy(app)
 
 # -------- Models Multi-Tenant --------
@@ -1313,4 +1325,5 @@ if __name__ == "__main__":
     print("🔑 Mot de passe: SuperAdmin2024!")
     print("⚠️  CHANGEZ CE MOT DE PASSE après connexion!")
     print("="*60)
+
     app.run(debug=True, host='0.0.0.0', port=5000)
