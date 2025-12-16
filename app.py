@@ -1,8 +1,59 @@
 
-# ============================================================
-# SyndicPro - Application Multi-Tenant de gestion de syndic
-# Version 3.0.5 - PostgreSQL SAFE (Render + Supabase)
-# ============================================================
+"""
+SyndicPro - Application Multi-Tenant de gestion de syndic
+Version 3.0.5 - SYSTÈME DE CRÉDIT INTÉGRÉ
+
+NOUVEAUTÉS V3.0.5:
+- 💳 Système de crédit résiduel automatique
+- ✅ Aucune perte d'argent sur les montants non utilisés
+- 🔄 Application automatique du crédit au prochain paiement
+- 📊 Affichage du crédit disponible dans l'interface
+- 🎯 Transparence totale pour les résidents et admins
+
+CORRECTIONS V3.0.4:
+- ✅ Ajout d'un champ "Mois de redevance" pour choisir le mois de départ
+- ✅ Mode AUTO : Si non rempli, détection automatique du premier mois impayé
+- ✅ Mode MANUEL : Si rempli, commence au mois spécifié par l'admin
+
+TARIFICATION:
+- Essai gratuit: 30 jours
+- < 20 appartements: 30 DT/mois
+- 20-75 appartements: 50 DT/mois  
+- > 75 appartements: 75 DT/mois
+
+Super Admin: superadmin@syndicpro.tn / SuperAdmin2024! (à changer)
+"""
+
+# ----- Vérification des dépendances -----
+missing = []
+try:
+    import flask
+except Exception:
+    missing.append('Flask')
+try:
+    import flask_sqlalchemy
+except Exception:
+    missing.append('Flask-SQLAlchemy')
+try:
+    import pandas
+except Exception:
+    missing.append('pandas')
+try:
+    import openpyxl
+except Exception:
+    missing.append('openpyxl')
+try:
+    import werkzeug
+except Exception:
+    missing.append('Werkzeug')
+
+if missing:
+    msg = ("Dépendances manquantes : " + ", ".join(missing) + ".\n" +
+           "Exécutez : pip install -r requirements.txt\n")
+    print(msg)
+    if __name__ == '__main__':
+        import sys
+        sys.exit(1)
 
 from flask import Flask, render_template, request, redirect, url_for, session, send_file, jsonify, flash, abort
 from flask_sqlalchemy import SQLAlchemy
@@ -12,43 +63,39 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 import io
 import os
-import secrets
 import calendar
-
-# ============================================================
-# CONFIG
-# ============================================================
+import secrets
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__)
 
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'CHANGE_ME')
+# 🔥 CONFIGURATION POUR RENDER 🔥
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-key-change-in-production')
 
-DATABASE_URL = os.environ.get('DATABASE_URL')
-if not DATABASE_URL:
-    raise RuntimeError("❌ DATABASE_URL manquant (Render / Supabase)")
+# Configuration de la base de données
+database_url = os.environ.get('DATABASE_URL')
 
-# Fix Render
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace(
-        "postgres://", "postgresql+psycopg2://", 1
-    )
+# Si pas de DATABASE_URL (en local), utiliser SQLite
+if not database_url:
+    # Créer le dossier database s'il n'existe pas
+    database_dir = os.path.join(BASE_DIR, 'database')
+    if not os.path.exists(database_dir):
+        os.makedirs(database_dir)
+    database_url = 'sqlite:///' + os.path.join(database_dir, 'syndicpro.db')
 
-app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+# Si on utilise PostgreSQL sur Render, corriger l'URL
+if database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_pre_ping': True,
-    'pool_recycle': 300,
-    'connect_args': {'sslmode': 'require'}
-}
 
 db = SQLAlchemy(app)
 
-# ============================================================
-# MODELS (IDENTIQUES)
-# ============================================================
+# -------- Models Multi-Tenant --------
 
 class Organization(db.Model):
+    """Organisation = 1 Syndic client"""
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(200), nullable=False)
     slug = db.Column(db.String(100), unique=True, nullable=False)
@@ -57,40 +104,55 @@ class Organization(db.Model):
     address = db.Column(db.String(300))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_active = db.Column(db.Boolean, default=True)
+    
+    subscription = db.relationship('Subscription', backref='organization', uselist=False, lazy=True)
+    users = db.relationship('User', backref='organization', lazy=True)
+    blocks = db.relationship('Block', backref='organization', lazy=True, cascade='all, delete-orphan')
+    apartments = db.relationship('Apartment', backref='organization', lazy=True, cascade='all, delete-orphan')
+    payments = db.relationship('Payment', backref='organization', lazy=True, cascade='all, delete-orphan')
+    expenses = db.relationship('Expense', backref='organization', lazy=True, cascade='all, delete-orphan')
+    tickets = db.relationship('Ticket', backref='organization', lazy=True, cascade='all, delete-orphan')
+    alerts = db.relationship('UnpaidAlert', backref='organization', lazy=True, cascade='all, delete-orphan')
 
 class Subscription(db.Model):
+    """Abonnement de l'organisation"""
     id = db.Column(db.Integer, primary_key=True)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'))
+    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'), nullable=False)
     plan = db.Column(db.String(20), default='trial')
     status = db.Column(db.String(20), default='active')
     start_date = db.Column(db.DateTime, default=datetime.utcnow)
     end_date = db.Column(db.DateTime)
     monthly_price = db.Column(db.Float, default=0.0)
     max_apartments = db.Column(db.Integer, default=20)
-
+    
     def is_expired(self):
-        return self.end_date and datetime.utcnow() > self.end_date
-
+        if not self.end_date:
+            return False
+        return datetime.utcnow() > self.end_date
+    
     def days_remaining(self):
         if not self.end_date:
             return 0
-        return max(0, (self.end_date - datetime.utcnow()).days)
-
-    def calculate_price(self, count):
-        if count < 20:
+        delta = self.end_date - datetime.utcnow()
+        return max(0, delta.days)
+    
+    def calculate_price(self, apartment_count):
+        """Calcule le prix selon le nombre d'appartements"""
+        if apartment_count < 20:
             return 30.0
-        elif count <= 75:
+        elif apartment_count <= 75:
             return 50.0
-        return 75.0
+        else:
+            return 75.0
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'))
+    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'), nullable=True)
     email = db.Column(db.String(120), nullable=False)
     name = db.Column(db.String(120))
     password_hash = db.Column(db.String(256))
     role = db.Column(db.String(20))
-    apartment_id = db.Column(db.Integer, db.ForeignKey('apartment.id'))
+    apartment_id = db.Column(db.Integer, db.ForeignKey('apartment.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def set_password(self, pwd):
@@ -101,99 +163,264 @@ class User(db.Model):
 
 class Block(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'))
-    name = db.Column(db.String(50))
+    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'), nullable=False)
+    name = db.Column(db.String(50), nullable=False)
+    apartments = db.relationship('Apartment', backref='block', lazy=True)
 
 class Apartment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'))
-    number = db.Column(db.String(20))
-    block_id = db.Column(db.Integer, db.ForeignKey('block.id'))
+    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'), nullable=False)
+    number = db.Column(db.String(20), nullable=False)
+    block_id = db.Column(db.Integer, db.ForeignKey('block.id'), nullable=False)
     monthly_fee = db.Column(db.Float, default=100.0)
-    credit_balance = db.Column(db.Float, default=0.0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    credit_balance = db.Column(db.Float, default=0.0)  # 🆕 NOUVEAU : Crédit résiduel
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)  
+    residents = db.relationship('User', backref='apartment', lazy=True)
+    payments = db.relationship('Payment', backref='apartment', lazy=True, cascade='all, delete-orphan')
+    tickets = db.relationship('Ticket', backref='apartment', lazy=True)
 
 class Payment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'))
-    apartment_id = db.Column(db.Integer, db.ForeignKey('apartment.id'))
+    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'), nullable=False)
+    apartment_id = db.Column(db.Integer, db.ForeignKey('apartment.id'), nullable=False)
     amount = db.Column(db.Float, nullable=False)
     payment_date = db.Column(db.Date, nullable=False)
     month_paid = db.Column(db.String(7), nullable=False)
     description = db.Column(db.String(200))
-    credit_used = db.Column(db.Float, default=0.0)
+    credit_used = db.Column(db.Float, default=0.0)  # 🆕 NOUVEAU : Crédit utilisé pour ce paiement
 
 class Expense(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'))
-    amount = db.Column(db.Float)
-    expense_date = db.Column(db.Date)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    expense_date = db.Column(db.Date, nullable=False)
     category = db.Column(db.String(120))
     description = db.Column(db.String(300))
 
 class Ticket(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'))
-    apartment_id = db.Column(db.Integer, db.ForeignKey('apartment.id'))
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    subject = db.Column(db.String(200))
-    message = db.Column(db.Text)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'), nullable=False)
+    apartment_id = db.Column(db.Integer, db.ForeignKey('apartment.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    subject = db.Column(db.String(200), nullable=False)
+    message = db.Column(db.Text, nullable=False)
     status = db.Column(db.String(20), default='ouvert')
     priority = db.Column(db.String(20), default='normale')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     admin_response = db.Column(db.Text)
+    user = db.relationship('User', backref='tickets')
 
 class UnpaidAlert(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'))
-    apartment_id = db.Column(db.Integer, db.ForeignKey('apartment.id'))
-    months_unpaid = db.Column(db.Integer)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organization.id'), nullable=False)
+    apartment_id = db.Column(db.Integer, db.ForeignKey('apartment.id'), nullable=False)
+    months_unpaid = db.Column(db.Integer, nullable=False)
     alert_date = db.Column(db.DateTime, default=datetime.utcnow)
     email_sent = db.Column(db.Boolean, default=False)
+    apartment = db.relationship('Apartment', backref='alerts')
 
-# ============================================================
-# INIT DB (SAFE)
-# ============================================================
+# -------- Fonctions utilitaires --------
 
 def init_db():
+    """Initialise la base de données multi-tenant"""
+    db_dir = os.path.join(BASE_DIR, 'database')
+    os.makedirs(db_dir, exist_ok=True)
     db.create_all()
-
+    
+    # 🆕 Migration : Ajouter credit_balance si la colonne n'existe pas
+    try:
+        with db.engine.connect() as conn:
+            result = conn.execute(db.text("PRAGMA table_info(apartment)"))
+            columns = [row[1] for row in result]
+            if 'credit_balance' not in columns:
+                conn.execute(db.text("ALTER TABLE apartment ADD COLUMN credit_balance REAL DEFAULT 0.0"))
+                conn.commit()
+                print("✅ Colonne credit_balance ajoutée à la table apartment")
+            
+            # Ajouter credit_used à Payment si n'existe pas
+            result = conn.execute(db.text("PRAGMA table_info(payment)"))
+            columns = [row[1] for row in result]
+            if 'credit_used' not in columns:
+                conn.execute(db.text("ALTER TABLE payment ADD COLUMN credit_used REAL DEFAULT 0.0"))
+                conn.commit()
+                print("✅ Colonne credit_used ajoutée à la table payment")
+    except Exception as e:
+        print(f"⚠️ Erreur lors de la migration : {e}")
+    
     if not User.query.filter_by(email='superadmin@syndicpro.tn').first():
-        admin = User(
+        superadmin = User(
             email='superadmin@syndicpro.tn',
             name='Super Administrateur',
-            role='superadmin'
+            role='superadmin',
+            organization_id=None
         )
-        admin.set_password('SuperAdmin2024!')
-        db.session.add(admin)
+        superadmin.set_password('SuperAdmin2024!')
+        db.session.add(superadmin)
         db.session.commit()
-
-# ============================================================
-# HELPERS (IDENTIQUES)
-# ============================================================
+        print("✅ Super Admin créé: superadmin@syndicpro.tn / SuperAdmin2024!")
+        print("⚠️  CHANGEZ CE MOT DE PASSE après la première connexion!")
 
 def current_user():
     uid = session.get('user_id')
-    return User.query.get(uid) if uid else None
+    if not uid:
+        return None
+    return User.query.get(uid)
 
 def current_organization():
     user = current_user()
-    if not user or user.role == 'superadmin':
+    if not user:
+        return None
+    if user.role == 'superadmin':
         return None
     return Organization.query.get(user.organization_id)
 
-# ============================================================
-# HEALTH CHECK (DEBUG)
-# ============================================================
+def check_subscription():
+    org = current_organization()
+    if not org:
+        return True
+    if not org.subscription:
+        return False
+    return not org.subscription.is_expired() and org.subscription.status == 'active'
 
-@app.route('/health')
-def health():
-    try:
-        db.session.execute(db.text("SELECT 1"))
-        return "OK"
-    except Exception as e:
-        return str(e), 500
+def login_required(f):
+    from functools import wraps
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not current_user():
+            flash("Veuillez vous connecter.", "warning")
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return wrapper
+
+def subscription_required(f):
+    from functools import wraps
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+        if user and user.role == 'superadmin':
+            return f(*args, **kwargs)
+        if not check_subscription():
+            flash("Votre abonnement a expiré. Veuillez le renouveler.", "danger")
+            return redirect(url_for('subscription_status'))
+        return f(*args, **kwargs)
+    return wrapper
+
+def admin_required(f):
+    from functools import wraps
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+        if not user or user.role not in ['admin', 'superadmin']:
+            flash("Accès administrateur requis.", "danger")
+            return redirect(url_for('dashboard'))
+        return f(*args, **kwargs)
+    return wrapper
+
+def superadmin_required(f):
+    from functools import wraps
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+        if not user or user.role != 'superadmin':
+            flash("Accès super administrateur requis.", "danger")
+            return redirect(url_for('dashboard'))
+        return f(*args, **kwargs)
+    return wrapper
+
+def get_unpaid_months_count(apartment_id):
+    """Compte le nombre de mois impayés DEPUIS LA CRÉATION de l'appartement"""
+    apt = Apartment.query.get(apartment_id)
+    if not apt:
+        return 0
+    
+    payments = Payment.query.filter_by(apartment_id=apartment_id).all()
+    paid_months = set(p.month_paid for p in payments)
+    
+    if apt.created_at:
+        start_date = apt.created_at.date().replace(day=1)
+    else:
+        start_date = date.today().replace(day=1)
+    
+    current = start_date
+    end_date = date.today().replace(day=1)
+    
+    unpaid_count = 0
+    while current <= end_date:
+        month_str = current.strftime('%Y-%m')
+        if month_str not in paid_months:
+            unpaid_count += 1
+        current += relativedelta(months=1)
+    
+    return unpaid_count
+
+def get_next_unpaid_month(apartment_id):
+    """
+    Retourne le premier mois (YYYY-MM) non couvert par un paiement
+    depuis la création de l'appartement, en regardant jusqu'à 3 mois dans le futur.
+    """
+    apt = Apartment.query.get(apartment_id)
+    if not apt:
+        return date.today().strftime('%Y-%m')
+    
+    payments = Payment.query.filter_by(apartment_id=apartment_id).all()
+    paid_months = set(p.month_paid for p in payments)
+    
+    if apt.created_at:
+        start_date = apt.created_at.date().replace(day=1)
+    else:
+        start_date = date.today().replace(day=1)
+    
+    current = start_date
+    end_check_date = date.today().replace(day=1) + relativedelta(months=3)
+
+    while current <= end_check_date:
+        month_str = current.strftime('%Y-%m')
+        if month_str not in paid_months:
+            return month_str
+        current += relativedelta(months=1)
+    
+    return (end_check_date + relativedelta(months=1)).strftime('%Y-%m')
+
+def check_unpaid_alerts():
+    org = current_organization()
+    if not org:
+        return []
+    apartments = Apartment.query.filter_by(organization_id=org.id).all()
+    alerts_created = []
+    for apt in apartments:
+        unpaid_count = get_unpaid_months_count(apt.id)
+        if unpaid_count >= 3:
+            recent_alert = UnpaidAlert.query.filter_by(
+                apartment_id=apt.id
+            ).filter(
+                UnpaidAlert.alert_date > datetime.utcnow() - timedelta(days=30)
+            ).first()
+            if not recent_alert:
+                alert = UnpaidAlert(
+                    organization_id=org.id,
+                    apartment_id=apt.id,
+                    months_unpaid=unpaid_count
+                )
+                db.session.add(alert)
+                alerts_created.append(apt)
+    if alerts_created:
+        db.session.commit()
+    return alerts_created
+
+def last_n_months(n=12):
+    today = date.today()
+    months = []
+    for i in range(n-1, -1, -1):
+        month_date = today - relativedelta(months=i)
+        months.append((month_date.year, month_date.month))
+    return months
+
+def get_month_name(month_num):
+    months_fr = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 
+                 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc']
+    return months_fr[month_num - 1]
+
 # -------- Routes --------
 
 @app.route('/')
@@ -1174,7 +1401,6 @@ def internal_error(error):
 if __name__ == "__main__":
     with app.app_context():
         init_db()
-    app.run(host="0.0.0.0", port=5000)
     print("="*60)
     print("🚀 SYNDICPRO MULTI-TENANT - VERSION 3.0.5")
     print("="*60)
@@ -1187,4 +1413,3 @@ if __name__ == "__main__":
     print("⚠️  CHANGEZ CE MOT DE PASSE après connexion!")
     print("="*60)
     app.run(debug=True, host='0.0.0.0', port=5000)
-
