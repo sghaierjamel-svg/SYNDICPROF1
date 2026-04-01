@@ -1167,6 +1167,8 @@ def residents_menu():
     next_month = None
     my_payments = []
     credit = 0.0
+    history_6months = []
+    apt = None
     if user.apartment_id:
         unpaid_count = get_unpaid_months_count(user.apartment_id)
         next_month = get_next_unpaid_month(user.apartment_id)
@@ -1174,7 +1176,20 @@ def residents_menu():
         apt = Apartment.query.get(user.apartment_id)
         if apt:
             credit = apt.credit_balance
-    return render_template('residents.html', user=user, unpaid_count=unpaid_count, next_month=next_month, my_payments=my_payments, credit=credit)
+        paid_months = {p.month_paid for p in my_payments}
+        months_fr = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin',
+                     'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre']
+        for (y, m) in last_n_months(6):
+            month_str = f"{y}-{m:02d}"
+            paid_entry = next((p for p in my_payments if p.month_paid == month_str), None)
+            history_6months.append({
+                'label': f"{months_fr[m-1]} {y}",
+                'paid': paid_entry is not None,
+                'amount': paid_entry.amount if paid_entry else 0,
+            })
+    return render_template('residents.html', user=user, unpaid_count=unpaid_count,
+                           next_month=next_month, my_payments=my_payments, credit=credit,
+                           apt=apt, history_6months=history_6months)
 
 @app.route('/api/dashboard_data')
 @login_required
