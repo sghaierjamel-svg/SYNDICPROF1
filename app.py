@@ -21,7 +21,7 @@ TARIFICATION:
 - 20-75 appartements: 50 DT/mois  
 - > 75 appartements: 75 DT/mois
 
-Super Admin: superadmin@syndicpro.tn / SuperAdmin2024! (à changer)
+Super Admin: superadmin@syndicpro.tn / (mot de passe défini via variable SUPERADMIN_PASSWORD)
 """
 
 # ----- Vérification des dépendances -----
@@ -57,14 +57,19 @@ if missing:
 
 from flask import Flask, render_template, request, redirect, url_for, session, send_file, jsonify, flash, abort
 from flask_sqlalchemy import SQLAlchemy
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
+from dotenv import load_dotenv
 import pandas as pd
 import io
 import os
 import calendar
 import secrets
+
+load_dotenv()
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__)
@@ -91,6 +96,13 @@ app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://"
+)
 
 # -------- Models Multi-Tenant --------
 
@@ -255,11 +267,11 @@ def init_db():
             role='superadmin',
             organization_id=None
         )
-        superadmin.set_password('SuperAdmin2024!')
+        superadmin.set_password(os.environ.get('SUPERADMIN_PASSWORD', 'changez-moi'))
         db.session.add(superadmin)
         db.session.commit()
-        print("✅ Super Admin créé: superadmin@syndicpro.tn / SuperAdmin2024!")
-        print("⚠️  CHANGEZ CE MOT DE PASSE après la première connexion!")
+        print("✅ Super Admin créé: superadmin@syndicpro.tn")
+        print("⚠️  Mot de passe défini via variable d'environnement SUPERADMIN_PASSWORD")
 
 def current_user():
     uid = session.get('user_id')
@@ -437,6 +449,7 @@ def index():
     return render_template('index.html')
 
 @app.route('/login', methods=['GET', 'POST'])
+@limiter.limit("5 per minute", error_message="Trop de tentatives. Réessayez dans 1 minute.")
 def login():
     if request.method == 'POST':
         email = request.form['email'].strip().lower()
@@ -755,8 +768,9 @@ def payments():
                 flash(f"✅ Montant exact, aucun crédit résiduel", "info")
         
         except Exception as e:
-            flash(f'❌ Erreur: {str(e)}', 'danger')
-        
+            print(f"ERREUR paiement: {str(e)}")
+            flash('Une erreur est survenue. Réessayez.', 'danger')
+
         return redirect(url_for('payments'))
 
     # Préparer les données pour l'affichage
@@ -801,7 +815,7 @@ def edit_payment(payment_id):
         return redirect(url_for('payments'))
     return render_template('edit_payment.html', payment=p, apartments=apartments, user=current_user())
 
-@app.route('/payment/delete/<int:payment_id>')
+@app.route('/payment/delete/<int:payment_id>', methods=['POST'])
 @login_required
 @admin_required
 @subscription_required
@@ -836,7 +850,8 @@ def expenses():
             db.session.commit()
             flash('Dépense enregistrée', 'success')
         except Exception as e:
-            flash(f'Erreur: {str(e)}', 'danger')
+            print(f"ERREUR dépense: {str(e)}")
+            flash('Une erreur est survenue. Réessayez.', 'danger')
         return redirect(url_for('expenses'))
     expenses = Expense.query.filter_by(organization_id=org.id).order_by(Expense.expense_date.desc()).all()
     return render_template('expenses.html', expenses=expenses, user=current_user())
@@ -858,7 +873,7 @@ def edit_expense(expense_id):
         return redirect(url_for('expenses'))
     return render_template('edit_expense.html', expense=e, user=current_user())
 
-@app.route('/expense/delete/<int:expense_id>')
+@app.route('/expense/delete/<int:expense_id>', methods=['POST'])
 @login_required
 @admin_required
 @subscription_required
@@ -1409,7 +1424,7 @@ if __name__ == "__main__":
     print("🔄 Application automatique du crédit au prochain paiement")
     print("📊 Affichage du crédit dans toute l'interface")
     print("🔧 Super Admin: superadmin@syndicpro.tn")
-    print("🔑 Mot de passe: SuperAdmin2024!")
+    print("🔑 Mot de passe défini via variable SUPERADMIN_PASSWORD")
     print("⚠️  CHANGEZ CE MOT DE PASSE après connexion!")
     print("="*60)
     app.run(debug=True, host='0.0.0.0', port=5000)

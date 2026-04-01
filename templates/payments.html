@@ -219,11 +219,12 @@
                                            class="btn btn-sm btn-warning">
                                             <i class="fas fa-edit"></i>
                                         </a>
-                                        <a href="{{ url_for('delete_payment', payment_id=p.id) }}" 
-                                           class="btn btn-sm btn-danger"
-                                           onclick="return confirm('Supprimer cet encaissement ?')">
-                                            <i class="fas fa-trash"></i>
-                                        </a>
+                                        <form method="POST" action="{{ url_for('delete_payment', payment_id=p.id) }}" style="display:inline;">
+                                            <button type="submit" class="btn btn-sm btn-danger"
+                                                    onclick="return confirm('Supprimer cet encaissement ?')">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </form>
                                     </td>
                                 </tr>
                                 {% endfor %}
